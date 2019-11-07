@@ -1,70 +1,81 @@
-# -*- mode: ruby -*-
-# vi: set ft=ruby :
+default_box = 'ubuntu/bionic64'
 
-# All Vagrant configuration is done below. The "2" in Vagrant.configure
-# configures the configuration version (we support older styles for
-# backwards compatibility). Please don't change it unless you know what
-# you're doing.
-Vagrant.configure("2") do |config|
-  # The most common configuration options are documented and commented below.
-  # For a complete reference, please see the online documentation at
-  # https://docs.vagrantup.com.
+Vagrant.configure(2) do |config|
+  config.vm.define 'master' do |master|
+    master.vm.box = default_box
+    master.vm.hostname = "master"
+    master.vm.synced_folder ".", "/vagrant", type:"virtualbox"
+    master.vm.network 'private_network', ip: "192.168.0.200",  virtualbox__intnet: true
+    master.vm.network "forwarded_port", guest: 22, host: 2222, id: "ssh", disabled: true
+    master.vm.network "forwarded_port", guest: 22, host: 2000 # SSH TO MASTER/NODE
+    master.vm.network "forwarded_port", guest: 6443, host: 6443 # ACCESS K8S API
+    for p in 30000..30100 # PORTS DEFINED FOR K8S TYPE-NODE-PORT ACCESS
+      master.vm.network "forwarded_port", guest: p, host: p, protocol: "tcp"
+      end
+    master.vm.provider "virtualbox" do |v|
+      v.memory = "1024"
+      v.name = "master"
+      end
 
-  # Every Vagrant development environment requires a box. You can search for
-  # boxes at https://vagrantcloud.com/search.
-  config.vm.box = "generic/debian9"
+    master.vm.provision "shell", inline: <<-SHELL
+      sudo apt update
+      sudo apt install etcd-server etcd-client -y
+      IPADDR=$(ip a show enp0s8 | grep "inet " | awk '{print $2}' | cut -d / -f1)
+      curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--node-ip=${IPADDR} --flannel-iface=enp0s8 --write-kubeconfig-mode 644 --kube-apiserver-arg="service-node-port-range=30000-30100" --no-deploy=servicelb --no-deploy=traefik" K3S_STORAGE_BACKEND=etcd3 K3S_STORAGE_ENDPOINT="http://127.0.0.1:2379" sh -
+      hostnamectl set-hostname master
+      NODE_TOKEN="/var/lib/rancher/k3s/server/node-token"
+      while [ ! -e ${NODE_TOKEN} ]
+      do
+          sleep 1
+      done
+      cat ${NODE_TOKEN}
+      cp ${NODE_TOKEN} /vagrant/
+      sudo sed -i 's/ChallengeResponseAuthentication no/ChallengeResponseAuthentication yes/g' /etc/ssh/sshd_config
+      sudo systemctl reload ssh
+      KUBE_CONFIG="/etc/rancher/k3s/k3s.yaml"
+      cp ${KUBE_CONFIG} /vagrant/ #copy contents of "k3s.yaml" to ".kube/config" to 'kubectl' from local-machine
+    SHELL
+  end
 
-  # Disable automatic box update checking. If you disable this, then
-  # boxes will only be checked for updates when the user runs
-  # `vagrant box outdated`. This is not recommended.
-  # config.vm.box_check_update = false
+  config.vm.define 'node1' do |node1|
+    node1.vm.box = default_box
+    node1.vm.hostname = "node1"
+    node1.vm.synced_folder ".", "/vagrant", type:"virtualbox"
+    node1.vm.network 'private_network', ip: "192.168.0.201",  virtualbox__intnet: true
+    node1.vm.network "forwarded_port", guest: 22, host: 2222, id: "ssh", disabled: true
+    node1.vm.network "forwarded_port", guest: 22, host: 2001
+    node1.vm.provider "virtualbox" do |v|
+      v.memory = "1024"
+      v.name = "node1"
+      end
+    
+    node1.vm.provision "shell", inline: <<-SHELL
+      IPADDR=$(ip a show enp0s8 | grep "inet " | awk '{print $2}' | cut -d / -f1)
+      curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--node-ip=${IPADDR} --flannel-iface=enp0s8" K3S_URL=https://192.168.0.200:6443 K3S_TOKEN=$(cat /vagrant/node-token) sh -
+      sudo sed -i 's/ChallengeResponseAuthentication no/ChallengeResponseAuthentication yes/g' /etc/ssh/sshd_config
+      sudo systemctl reload ssh
+    SHELL
+  end
 
-  # Create a forwarded port mapping which allows access to a specific port
-  # within the machine from a port on the host machine. In the example below,
-  # accessing "localhost:8080" will access port 80 on the guest machine.
-  # NOTE: This will enable public access to the opened port
-  config.vm.network "forwarded_port", guest: 6443, host: 8080
+  config.vm.define 'node2' do |node2|
+    node2.vm.box = default_box
+    node2.vm.hostname = "node2"
+    node2.vm.synced_folder ".", "/vagrant", type:"virtualbox"
+    node2.vm.network 'private_network', ip: "192.168.0.202",  virtualbox__intnet: true
+    node2.vm.network "forwarded_port", guest: 22, host: 2222, id: "ssh", disabled: true
+    node2.vm.network "forwarded_port", guest: 22, host: 2002
+    node2.vm.provider "virtualbox" do |v|
+      v.memory = "1024"
+      v.name = "node2"
+      end
+    
+    node2.vm.provision "shell", inline: <<-SHELL
+      IPADDR=$(ip a show enp0s8 | grep "inet " | awk '{print $2}' | cut -d / -f1)
+      curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--node-ip=${IPADDR} --flannel-iface=enp0s8" K3S_URL=https://192.168.0.200:6443 K3S_TOKEN=$(cat /vagrant/node-token) sh -
+      rm -f /vagrant/node-token
+      sudo sed -i 's/ChallengeResponseAuthentication no/ChallengeResponseAuthentication yes/g' /etc/ssh/sshd_config
+      sudo systemctl reload ssh
+    SHELL
+  end
 
-  # Create a forwarded port mapping which allows access to a specific port
-  # within the machine from a port on the host machine and only allow access
-  # via 127.0.0.1 to disable public access
-  # config.vm.network "forwarded_port", guest: 6443, host: 8080, host_ip: "127.0.0.1"
-
-  # Create a private network, which allows host-only access to the machine
-  # using a specific IP.
-  # config.vm.network "private_network", ip: "192.168.33.10"
-
-  # Create a public network, which generally matched to bridged network.
-  # Bridged networks make the machine appear as another physical device on
-  # your network.
-  # config.vm.network "public_network"
-
-  # Share an additional folder to the guest VM. The first argument is
-  # the path on the host to the actual folder. The second argument is
-  # the path on the guest to mount the folder. And the optional third
-  # argument is a set of non-required options.
-  # config.vm.synced_folder "../data", "/vagrant_data"
-
-  # Provider-specific configuration so you can fine-tune various
-  # backing providers for Vagrant. These expose provider-specific options.
-  # Example for VirtualBox:
-  #
-  # config.vm.provider "virtualbox" do |vb|
-  #   # Display the VirtualBox GUI when booting the machine
-  #   vb.gui = true
-  #
-  #   # Customize the amount of memory on the VM:
-  #   vb.memory = "1024"
-  # end
-  #
-  # View the documentation for the provider you are using for more
-  # information on available options.
-
-  # Enable provisioning with a shell script. Additional provisioners such as
-  # Puppet, Chef, Ansible, Salt, and Docker are also available. Please see the
-  # documentation for more information about their specific syntax and use.
-  config.vm.provision "shell", inline: <<-SHELL
-    apt-get update
-    curl -sfL https://get.k3s.io | sh -
-  SHELL
 end
